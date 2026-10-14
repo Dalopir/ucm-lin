@@ -1,0 +1,76 @@
+diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
+index c84d12608..ab6b92777 100644
+--- a/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -372,6 +372,8 @@
+ 448	common	process_mrelease	sys_process_mrelease
+ 449	common	futex_waitv		sys_futex_waitv
+ 450	common	set_mempolicy_home_node	sys_set_mempolicy_home_node
++451	common	lin_hello		sys_lin_hello
++452	common	ledctl			sys_ledctl
+ 
+ #
+ # Due to a historical design error, certain syscalls are numbered differently
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 10ef068f5..c33d8a9c0 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -10,7 +10,7 @@ obj-y     = fork.o exec_domain.o panic.o \
+ 	    extable.o params.o \
+ 	    kthread.o sys_ni.o nsproxy.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+-	    async.o range.o smpboot.o ucount.o regset.o
++	    async.o range.o smpboot.o ucount.o regset.o lin_hello.o ledctl.o
+ 
+ obj-$(CONFIG_USERMODE_DRIVER) += usermode_driver.o
+ obj-$(CONFIG_MODULES) += kmod.o
+diff --git a/kernel/ledctl.c b/kernel/ledctl.c
+new file mode 100644
+index 000000000..442807009
+--- /dev/null
++++ b/kernel/ledctl.c
+@@ -0,0 +1,30 @@
++#include <linux/syscalls.h>
++#include <linux/vt_kern.h>
++#include <linux/kernel.h>
++
++struct tty_driver* kbd_driver = NULL;
++
++struct tty_driver* get_kbd_driver_handler(void){
++   return vc_cons[fg_console].d->port.tty->driver;
++}
++
++static inline int set_leds(struct tty_driver* handler, unsigned int mask){
++    return (handler->ops->ioctl) (vc_cons[fg_console].d->port.tty, KDSETLED, mask);
++}
++
++SYSCALL_DEFINE1(ledctl, unsigned int, leds) {
++    if (leds > 7)
++        return -EINVAL;
++
++    if (kbd_driver == NULL)
++        kbd_driver = get_kbd_driver_handler();
++
++    int err = set_leds(kbd_driver, leds);
++    if (err != 0) {
++        printk(KERN_INFO "ledctl: something went wrong\n");
++        return err;
++    }
++
++    return 0;
++}
++
+diff --git a/kernel/lin_hello.c b/kernel/lin_hello.c
+new file mode 100644
+index 000000000..f019602ec
+--- /dev/null
++++ b/kernel/lin_hello.c
+@@ -0,0 +1,8 @@
++#include <linux/syscalls.h> /* For SYSCALL_DEFINEi() */
++#include <linux/kernel.h>
++
++SYSCALL_DEFINE0(lin_hello)
++{
++    printk(KERN_DEBUG "Hello world\n");
++    return 0;
++}

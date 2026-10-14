@@ -1,0 +1,39 @@
+diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
+index c84d12608..c260d5ecd 100644
+--- a/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -372,6 +372,7 @@
+ 448	common	process_mrelease	sys_process_mrelease
+ 449	common	futex_waitv		sys_futex_waitv
+ 450	common	set_mempolicy_home_node	sys_set_mempolicy_home_node
++451	common	lin_hello		sys_lin_hello
+ 
+ #
+ # Due to a historical design error, certain syscalls are numbered differently
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 10ef068f5..600b57815 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -10,7 +10,7 @@ obj-y     = fork.o exec_domain.o panic.o \
+ 	    extable.o params.o \
+ 	    kthread.o sys_ni.o nsproxy.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+-	    async.o range.o smpboot.o ucount.o regset.o
++	    async.o range.o smpboot.o ucount.o regset.o lin_hello.o
+ 
+ obj-$(CONFIG_USERMODE_DRIVER) += usermode_driver.o
+ obj-$(CONFIG_MODULES) += kmod.o
+diff --git a/kernel/lin_hello.c b/kernel/lin_hello.c
+new file mode 100644
+index 000000000..f019602ec
+--- /dev/null
++++ b/kernel/lin_hello.c
+@@ -0,0 +1,8 @@
++#include <linux/syscalls.h> /* For SYSCALL_DEFINEi() */
++#include <linux/kernel.h>
++
++SYSCALL_DEFINE0(lin_hello)
++{
++    printk(KERN_DEBUG "Hello world\n");
++    return 0;
++}
