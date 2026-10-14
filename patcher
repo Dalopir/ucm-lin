@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Gestion de parches para el kernel linux-6.2.16
+#   ./patcher create <parche>   Guarda los cambios sin commitear (git diff) en <parche>
+#   ./patcher apply  <parche>   Aplica <parche> (git apply), el arbol debe estar limpio
+#   ./patcher clean             Descarta los cambios sin commitear
+#   ./patcher diff              Muestra los cambios sin commitear (incluye ficheros nuevos)
+
+# Path global del kernel (por defecto, junto a este script)
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+KERNEL_DIR="${KERNEL_DIR:-$SCRIPT_DIR/kernel/linux-6.2.16}"
+KERNEL_CHECK_FILE="Makefile"   # archivo que valida que es un arbol del kernel
+KERNEL_CONFIG_FILE=".config"   # existe si el kernel ya esta configurado
+
+die() { echo "Error: $*" >&2; exit 1; }
+
+show_usage() {
+    cat <<EOF
+Uso:
+  ${0##*/} create <parche>   Crea un parche con los cambios sin commitear
+  ${0##*/} apply  <parche>   Aplica un parche (el repositorio debe estar limpio)
+  ${0##*/} clean             Limpia los cambios sin commitear
+  ${0##*/} diff              Muestra los cambios sin commitear (incluye ficheros nuevos)
+  ${0##*/} -h | --help       Muestra esta ayuda
+EOF
+}
+
+usage() {
+    show_usage >&2
+    exit 1
+}
+
+help() {
+    show_usage
+    echo
+    show_setup
+    exit 0
+}
+
+show_setup() {
+    local KDIR_NAME="$(basename "$KERNEL_DIR")"  # prompt: directorio desde el que ejecutar
+    cat <<EOF
+Preparacion del kernel antes de usar este script:
+  (cada comando se ejecuta en el directorio indicado antes del "$")
+  1. Descomprimir el kernel en: $KERNEL_DIR
+       (debe contener $KERNEL_CHECK_FILE; o usa KERNEL_DIR=/otra/ruta ${0##*/} ...)
+  2. Configurarlo (genera $KERNEL_CONFIG_FILE):
+       $KDIR_NAME $ cp /ruta/al/.config-de-clase .config
+       $KDIR_NAME $ make oldconfig
+  3. Inicializar git y commitear el kernel ya configurado:
+       $KDIR_NAME $ git init
+       $KDIR_NAME $ git add -A
+       $KDIR_NAME $ git commit -m 'Kernel configurado'
+EOF
+}
+
+# Error de preparacion del kernel: muestra el fallo y como dejarlo listo
+setup_die() {
+    echo "Error: $*" >&2
+    echo >&2
+    show_setup >&2
+    exit 1
+}
+
+check_kernel() {
+    [[ -d "$KERNEL_DIR" ]] || setup_die "no existe el directorio del kernel: $KERNEL_DIR"
+    [[ -f "$KERNEL_DIR/$KERNEL_CHECK_FILE" ]] \
+        || setup_die "$KERNEL_DIR no parece un kernel valido (falta $KERNEL_CHECK_FILE)"
+    [[ -e "$KERNEL_DIR/.git" ]] || setup_die "$KERNEL_DIR no es un repositorio git"
+    [[ -f "$KERNEL_DIR/$KERNEL_CONFIG_FILE" ]] \
+        || setup_die "el kernel no esta configurado (falta $KERNEL_CONFIG_FILE)"
+    kgit rev-parse --verify --quiet HEAD >/dev/null \
+        || setup_die "el repositorio no tiene ningun commit (hay que commitear el kernel ya configurado)"
+}
+
+kgit() { git -C "$KERNEL_DIR" "$@"; }
+
+# Sin cambios sin commitear: ni modificados (working tree o index) ni ficheros nuevos
+# sin seguimiento (los ignorados por .gitignore no cuentan)
+is_clean() {
+    [[ -z "$(kgit status --porcelain)" ]]
+}
+
+# git diff incluyendo los ficheros nuevos sin seguimiento. Usa un index temporal
+# para no modificar el index real del repositorio.
+full_diff() {
+    local idx rc
+    idx="$(mktemp)"
+    cp "$(kgit rev-parse --path-format=absolute --git-path index)" "$idx" || { rm -f "$idx"; return 1; }
+    GIT_INDEX_FILE="$idx" kgit add -N -- . && GIT_INDEX_FILE="$idx" kgit diff "$@"
+    rc=$?
+    rm -f "$idx"
+    return $rc
+}
+
+# Convierte una ruta a absoluta respecto al directorio desde el que se lanzo el script
+abs_path() {
+    case "$1" in
+        /*) echo "$1" ;;
+        *)  echo "$PWD/$1" ;;
+    esac
+}
+
+cmd_create() {
+    [[ $# -eq 1 ]] || usage
+    local patch
+    patch="$(abs_path "$1")"
+
+    is_clean && die "no hay cambios sin commitear, no se crea el parche"
+    local msg="Parche creado"
+    [[ -e "$patch" ]] && msg="Parche sobrescrito"
+
+    full_diff > "$patch" || { rm -f "$patch"; die "fallo al ejecutar git diff"; }
+    echo "$msg: $1"
+}
+
+cmd_diff() {
+    [[ $# -eq 0 ]] || usage
+    is_clean && { echo "No hay cambios sin commitear"; return; }
+    full_diff || die "fallo al ejecutar git diff"
+}
+
+cmd_apply() {
+    [[ $# -eq 1 ]] || usage
+    local patch
+    patch="$(abs_path "$1")"
+
+    [[ -f "$patch" ]] || die "no existe el parche: $1"
+    is_clean || die "el repositorio no esta limpio; ejecuta '${0##*/} clean' o crea un parche antes"
+
+    kgit apply --check "$patch" || die "el parche no se puede aplicar limpiamente"
+    kgit apply "$patch" || die "fallo al aplicar el parche"
+    echo "Parche aplicado: $1"
+}
+
+cmd_clean() {
+    [[ $# -eq 0 ]] || usage
+    if is_clean; then
+        echo "El repositorio ya esta limpio"
+        return
+    fi
+
+    echo "Descartando cambios:"
+    kgit status --short
+
+    kgit reset --quiet HEAD -- . && kgit checkout -- . && kgit clean -fdq || die "fallo al limpiar"
+    echo "Cambios descartados"
+}
+
+[[ $# -ge 1 ]] || usage
+case "$1" in -h|--help|help) help ;; esac
+check_kernel
+
+cmd="$1"; shift
+case "$cmd" in
+    create) cmd_create "$@" ;;
+    apply)  cmd_apply  "$@" ;;
+    clean)  cmd_clean  "$@" ;;
+    diff)   cmd_diff   "$@" ;;
+    *)      usage ;;
+esac
