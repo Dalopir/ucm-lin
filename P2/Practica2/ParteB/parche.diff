@@ -26,10 +26,10 @@ index 10ef068f5..c33d8a9c0 100644
  obj-$(CONFIG_MODULES) += kmod.o
 diff --git a/kernel/ledctl.c b/kernel/ledctl.c
 new file mode 100644
-index 000000000..442807009
+index 000000000..96f01ec1b
 --- /dev/null
 +++ b/kernel/ledctl.c
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,32 @@
 +#include <linux/syscalls.h>
 +#include <linux/vt_kern.h>
 +#include <linux/kernel.h>
@@ -44,9 +44,11 @@ index 000000000..442807009
 +    return (handler->ops->ioctl) (vc_cons[fg_console].d->port.tty, KDSETLED, mask);
 +}
 +
-+SYSCALL_DEFINE1(ledctl, unsigned int, leds) {
-+    if (leds > 7)
++SYSCALL_DEFINE1(ledctl, unsigned int, arg) {
++    if (arg > 7)
 +        return -EINVAL;
++
++    unsigned int leds = ((arg&0x4)>>1)|((arg&0x2)<<1)|(arg&0x1);
 +
 +    if (kbd_driver == NULL)
 +        kbd_driver = get_kbd_driver_handler();
