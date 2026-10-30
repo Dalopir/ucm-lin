@@ -148,7 +148,7 @@ int init_module(void)
         /* Allocate device state structure and zero fill it */
         if ((ddata = kzalloc(sizeof(struct device_data), GFP_KERNEL)) == NULL) {
             ret = -ENOMEM;
-            goto error_alloc_state;
+            goto error_device;
         }
 
         /* Proper initialization */
@@ -179,7 +179,6 @@ int init_module(void)
 
 error_device:
     destroy_devices();
-error_alloc_state:
     class_destroy(class);
 error_class:
     /* Destroy chardev */

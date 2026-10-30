@@ -140,6 +140,7 @@ static int __init init_led_module(void) {
 error_gpio:
   for (j = 0; j < i; j++)
     gpiod_put(gpio_descriptors[j]);
+  device_destroy(class, start);
 error_device:
   class_destroy(class);
 error_class:
