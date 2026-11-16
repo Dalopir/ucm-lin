@@ -1,0 +1,279 @@
+#include "linux/init.h"
+#include <linux/spinlock.h>
+#include <linux/kernel.h>
+#include <linux/uaccess.h>
+#include <linux/module.h>
+#include <linux/miscdevice.h>
+#include <linux/slab.h>
+#include <linux/fs.h>
+#include <asm-generic/errno.h>
+#include <linux/gpio.h>
+#include <linux/delay.h>
+
+MODULE_DESCRIPTION("Misc Display7s Kernel Module - FDI-UCM");
+MODULE_AUTHOR("Juan Carlos Saez");
+MODULE_LICENSE("GPL");
+
+/* Bits associated with each segment */
+#define DS_A 0x80
+#define DS_B 0x40
+#define DS_C 0x20
+#define DS_D 0x10
+#define DS_E 0x08
+#define DS_F 0x04
+#define DS_G 0x02
+#define DS_DP 0x01
+#define SEGMENT_COUNT 8
+
+#define BUFFER_LENGTH 32
+
+#define MASK_0 (DS_A | DS_B | DS_C | DS_D | DS_E | DS_F)
+#define MASK_1 (DS_B | DS_C)
+#define MASK_2 (DS_A | DS_B | DS_D | DS_E | DS_G)
+#define MASK_3 (DS_A | DS_B | DS_C | DS_D | DS_G)
+#define MASK_4 (DS_B | DS_C | DS_F | DS_G)
+#define MASK_5 (DS_A | DS_C | DS_D | DS_F | DS_G)
+#define MASK_6 (DS_A | DS_C | DS_D | DS_E | DS_F | DS_G)
+#define MASK_7 (DS_A | DS_B | DS_C )
+#define MASK_8 (DS_A | DS_B | DS_C | DS_D | DS_E | DS_F | DS_G)
+#define MASK_9 (DS_A | DS_B | DS_C | DS_D | DS_F | DS_G)
+#define MASK_A (DS_A | DS_B | DS_C | DS_E | DS_F | DS_G)
+#define MASK_B (DS_C | DS_D | DS_E | DS_F | DS_G)
+#define MASK_C (DS_A | DS_D | DS_E | DS_F)
+#define MASK_D (DS_B | DS_C | DS_D | DS_E | DS_G)
+#define MASK_E (DS_A | DS_D | DS_E | DS_F | DS_G)
+#define MASK_F (DS_A | DS_E | DS_F | DS_G)
+
+/* Indices of GPIOs used by this module */
+enum
+{
+	SDI_IDX = 0,
+	RCLK_IDX,
+	SRCLK_IDX,
+	NR_GPIO_DISPLAY
+};
+
+/* Pin numbers */
+const int display_gpio[NR_GPIO_DISPLAY] = {18, 23, 24};
+
+/* Array to hold GPIO descriptors */
+struct gpio_desc *gpio_descriptors[NR_GPIO_DISPLAY];
+
+const char *display_gpio_str[NR_GPIO_DISPLAY] = {"sdi", "rclk", "srclk"};
+
+#define DEVICE_NAME "display7s" /* Device name */
+
+static size_t open_cnt = 0;
+DEFINE_SPINLOCK(open_cnt_lock);
+DEFINE_MUTEX(display7s_mtx);
+
+/*
+ *  Prototypes
+ */
+static ssize_t display7s_write(struct file *, const char *, size_t, loff_t *);
+static int display7s_open(struct inode *, struct file *);
+static int display7s_release(struct inode *, struct file *);
+
+/* Simple initialization of file_operations interface with a single operation */
+static struct file_operations fops = {
+    .owner = THIS_MODULE, // Avoid unloading the module while the file is open
+	.write = display7s_write,
+	.open = display7s_open,
+	.release = display7s_release,
+};
+
+static struct miscdevice display7s_misc = {
+	.minor = MISC_DYNAMIC_MINOR, /* kernel dynamically assigns a free minor# */
+	.name = DEVICE_NAME,		 /* when misc_register() is invoked, the kernel
+								  * will auto-create device file;
+								  * also populated within /sys/class/misc/ and /sys/devices/virtual/misc/ */
+	.mode = 0666,				 /* ... dev node perms set as specified here */
+	.fops = &fops,				 /* connect to this driver's 'functionality' */
+};
+
+static int get_mask(unsigned char data) {
+  if('A' <= data && data <= 'Z') data += 'a' - 'A';
+	pr_err("Char: %d\n", data);
+  switch (data) {
+  case '0': return MASK_0;
+  case '1': return MASK_1;
+  case '2': return MASK_2;
+  case '3': return MASK_3;
+  case '4': return MASK_4;
+  case '5': return MASK_5;
+  case '6': return MASK_6;
+  case '7': return MASK_7;
+  case '8': return MASK_8;
+  case '9': return MASK_9;
+  case 'a': return MASK_A;
+  case 'b': return MASK_B;
+  case 'c': return MASK_C;
+  case 'd': return MASK_D;
+  case 'e': return MASK_E;
+  case 'f': return MASK_F;
+  default:  return -1;
+  }
+}
+
+/* Update the 7-segment display with the configuration specified by the data parameter */
+static void update_7sdisplay(unsigned char data)
+{
+	int i = 0;
+	int value = 0;
+
+	mutex_lock(&display7s_mtx);
+
+	for (i = 0; i < SEGMENT_COUNT; i++)
+	{
+		/* Explore current bit (from most significant to least significant) */
+		if (0x80 & (data << i))
+			value = 1;
+		else
+			value = 0;
+
+		/* Set value of serial input */
+		gpiod_set_value(gpio_descriptors[SDI_IDX], value);
+		/* Generate clock cycle in shift register */
+		gpiod_set_value(gpio_descriptors[SRCLK_IDX], 1);
+		msleep(1);
+		gpiod_set_value(gpio_descriptors[SRCLK_IDX], 0);
+	}
+
+	/* Generate clock cycle in output register to update 7-seg display */
+	gpiod_set_value(gpio_descriptors[RCLK_IDX], 1);
+	msleep(1);
+	gpiod_set_value(gpio_descriptors[RCLK_IDX], 0);
+
+	mutex_unlock(&display7s_mtx);
+}
+
+/*
+ * Called when a process writes to dev file: echo "hi" > /dev/display7s
+ * Test with the following command to see the sequence better:
+ * $ while true; do echo > /dev/display7s; sleep 0.3; done
+ */
+static ssize_t
+display7s_write(struct file *filp, const char *buff, size_t len, loff_t *off)
+{
+	/* The variable is defined as static to have a counter value that persists across invocations of display7s_write */
+	static int counter = 0;
+
+  char buffer[BUFFER_LENGTH];
+  size_t available_space = BUFFER_LENGTH - 1;
+  size_t bytes_to_write = len;
+
+  if(bytes_to_write > available_space) 
+    return bytes_to_write = available_space;
+
+  if(copy_from_user(buffer, buff, bytes_to_write))
+    return -EFAULT;
+
+  buffer[bytes_to_write] = '\0';
+  char* trimmed = strim(buffer);
+
+  if(strlen(trimmed) != 1) return -EINVAL;
+
+	/* Update the corresponding value in the display */
+	size_t value = get_mask(trimmed[0]);
+
+	if(value == -1) return -EINVAL;
+
+	update_7sdisplay(value);
+
+
+	return len;
+}
+
+static int display7s_open(struct inode *inode, struct file *file) {
+	spin_lock(&open_cnt_lock);
+	if (open_cnt != 0) {
+		spin_unlock(&open_cnt_lock);
+		return -EBUSY;
+	}
+	open_cnt++;
+	spin_unlock(&open_cnt_lock);
+	return 0;
+}
+
+static int display7s_release(struct inode *inode, struct file *file) {
+	spin_lock(&open_cnt_lock);
+	open_cnt--;
+	spin_unlock(&open_cnt_lock);
+	return 0;
+}
+
+static int __init display7s_misc_init(void)
+{
+	int i, j;
+	int err = 0;
+	struct device *device;
+
+	for (i = 0; i < NR_GPIO_DISPLAY; i++)
+	{
+
+		/* Request the GPIO */
+		if ((err = gpio_request(display_gpio[i], display_gpio_str[i])))
+		{
+			pr_err("Failed GPIO[%d] %d request\n", i, display_gpio[i]);
+			goto err_handle;
+		}
+
+		/* Transform number into descriptor */
+		if (!(gpio_descriptors[i] = gpio_to_desc(display_gpio[i])))
+		{
+			pr_err("GPIO[%d] %d is not valid\n", i, display_gpio[i]);
+			err = -EINVAL;
+			goto err_handle;
+		}
+
+		/* Configure as an output pin */
+		gpiod_direction_output(gpio_descriptors[i], 0);
+	}
+
+	/* Set everything as LOW */
+	for (i = 0; i < NR_GPIO_DISPLAY; i++)
+		gpiod_set_value(gpio_descriptors[i], 0);
+
+	/* Register misc device that exposes 7-segment display */
+	err = misc_register(&display7s_misc);
+
+	if (err)
+	{
+		pr_err("Couldn't register misc device\n");
+		goto err_handle;
+	}
+
+	device = display7s_misc.this_device;
+
+	dev_info(device, "Display7s driver registered succesfully. To talk to\n");
+	dev_info(device, "the driver try to cat and echo to /dev/%s.\n", DEVICE_NAME);
+	dev_info(device, "Remove the module when done.\n");
+
+	return 0;
+err_handle:
+	for (j = 0; j < i; j++)
+		gpiod_put(gpio_descriptors[j]);
+	return err;
+}
+
+static void __exit display7s_misc_exit(void)
+{
+	int i = 0;
+
+	/* Unregister character device */
+	misc_deregister(&display7s_misc);
+
+	/* Clear display */
+	update_7sdisplay(0);
+
+	/* Free up pins */
+	for (i = 0; i < NR_GPIO_DISPLAY; i++)
+		gpiod_put(gpio_descriptors[i]);
+
+	mutex_destroy(&display7s_mtx);
+
+	pr_info("Display7s driver deregistered. Bye\n");
+}
+
+module_init(display7s_misc_init);
+module_exit(display7s_misc_exit);
