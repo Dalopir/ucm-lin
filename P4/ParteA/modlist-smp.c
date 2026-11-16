@@ -2,7 +2,6 @@
 #include <linux/kernel.h>
 #include <linux/proc_fs.h>
 #include <linux/string.h>
-#include <linux/vmalloc.h>
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/uaccess.h>
@@ -14,32 +13,31 @@ MODULE_AUTHOR("Jorge Hernandez Palop & Daniel Lopez Piris");
 #define BUFFER_LENGTH 128
 
 static struct list_head mylist;
-static struct proc_dir_entry* proc_entry;
-DEFINE_RWLOCK(rwl);
+static struct proc_dir_entry *proc_entry;
+static DEFINE_RWLOCK(rwl);
 
 struct list_item {
   int data;
   struct list_head links;
 };
 
-int add(char* buffer) {
-  // Declaracion de variables
-  int valid = 0;
-  struct list_item* new_node;
+static int add(char *buffer)
+{
+  int valid;
   int value;
+  struct list_item *new_node;
 
-  // Comprobar que el comando es válido
   valid = sscanf(buffer, "add %d", &value) == 1;
-
   if (!valid)
     return 0;
 
-  // Crear y anadir nodo
-  new_node = kmalloc(sizeof(struct list_item), GFP_KERNEL);
+  /* kmalloc() may sleep: do it BEFORE taking the spinlock */
+  new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
   if (new_node == NULL)
     return -ENOMEM;
 
   new_node->data = value;
+
   write_lock(&rwl);
   list_add_tail(&new_node->links, &mylist);
   write_unlock(&rwl);
@@ -47,94 +45,111 @@ int add(char* buffer) {
   return 1;
 }
 
-int remove(char* buffer) {
-  // Declaracion de variables
-  int valid = 0;
-  int same_value = 0;
-  struct list_item* item = NULL;
-  struct list_head* cur_node = NULL;
-  struct list_head* aux_node = NULL;
+static int remove(char *buffer)
+{
+  int valid;
   int value;
+  struct list_head *cur_node, *aux_node;
+  struct list_item *item, *tmp;
+  LIST_HEAD(to_free);
 
-  // Comprobar que el comando es válido
   valid = sscanf(buffer, "remove %d", &value) == 1;
-
   if (!valid)
     return 0;
 
-  // Eliminar los nodos
   write_lock(&rwl);
   list_for_each_safe(cur_node, aux_node, &mylist) {
     item = list_entry(cur_node, struct list_item, links);
-
-    same_value = value == item->data;
-
-    if (same_value) {
+    if (item->data == value) {
       list_del(cur_node);
-      kfree(item);
+      list_add_tail(cur_node, &to_free);
     }
   }
   write_unlock(&rwl);
 
+  /* Free outside the spinlock: shorter critical section. */
+  list_for_each_entry_safe(item, tmp, &to_free, links) {
+    list_del(&item->links);
+    kfree(item);
+  }
+
   return 1;
 }
 
-void cleanup_aux(void) {
-  // Declaracion de variables
-  struct list_item* item = NULL;
-  struct list_head* cur_node = NULL;
-  struct list_head* aux_node = NULL;
+static void cleanup_aux(void)
+{
+  struct list_head *cur_node, *aux_node;
+  struct list_item *item, *tmp;
+  LIST_HEAD(to_free);
 
-  // Eliminar todos los nodos
   write_lock(&rwl);
   list_for_each_safe(cur_node, aux_node, &mylist) {
     item = list_entry(cur_node, struct list_item, links);
     list_del(cur_node);
-    kfree(item);
+    list_add_tail(cur_node, &to_free);
   }
   write_unlock(&rwl);
+
+  list_for_each_entry_safe(item, tmp, &to_free, links) {
+    list_del(&item->links);
+    kfree(item);
+  }
 }
 
-int cleanup(char* buffer) {
-  // Declaracion de variables
+static int cleanup(char *buffer)
+{
   char cmd[16];
 
-  // Comprobar que el comando es válido
   if (sscanf(buffer, "%15s", cmd) != 1 || strcmp(cmd, "cleanup") != 0)
     return 0;
 
-  // Eliminar todos los nodos
   cleanup_aux();
   return 1;
 }
 
-static ssize_t modlist_write(struct file* filp, const char __user* buf, size_t len, loff_t* off) {
+static int modlist_open(struct inode *inode, struct file *file)
+{
+  /* Pin the module while the file is open; rmmod will fail with EBUSY. */
+  if (!try_module_get(THIS_MODULE))
+    return -ENODEV;
+
+  return 0;
+}
+
+static int modlist_release(struct inode *inode, struct file *file)
+{
+  module_put(THIS_MODULE);
+  return 0;
+}
+
+static ssize_t modlist_write(struct file *filp, const char __user *buf,
+                             size_t len, loff_t *off)
+{
   char buffer[BUFFER_LENGTH];
   int available_space = BUFFER_LENGTH - 1;
   int res;
 
-  if ((*off) > 0)
-    return 0;
-
   if (len > available_space) {
-    printk(KERN_INFO "Modlist: not enough space!!\n");
+    pr_info("Modlist: not enough space!!\n");
     return -ENOSPC;
   }
 
-  /* Transfer data from user to kernel space */
+  if (len == 0)
+    return 0;
+
   if (copy_from_user(buffer, buf, len))
     return -EFAULT;
 
   buffer[len] = '\0';
-  *off += len;
 
   res = add(buffer);
   if (res == 0)
     res = remove(buffer);
   if (res == 0)
     res = cleanup(buffer);
+
   if (res == 0) {
-    printk(KERN_INFO "Modlist: invalid command!!\n");
+    pr_info("Modlist: invalid command!!\n");
     return -EINVAL;
   }
   if (res < 0)
@@ -143,66 +158,74 @@ static ssize_t modlist_write(struct file* filp, const char __user* buf, size_t l
   return len;
 }
 
-static ssize_t modlist_read(struct file* filp, char __user* buf, size_t len, loff_t* off) {
-  // Declaracion de variables
+static ssize_t modlist_read(struct file *filp, char __user *buf,
+                            size_t len, loff_t *off)
+{
   char kbuf[BUFFER_LENGTH];
   int i = 0;
-  struct list_item* item = NULL;
-  struct list_head* cur_node = NULL;
+  int sz, written;
+  int truncated = 0;
+  struct list_item *item;
+  struct list_head *cur_node;
+  size_t n;
 
-  if ((*off) > 0) /* Tell the application that there is nothing left to read */
+  if ((*off) > 0)
     return 0;
+
   read_lock(&rwl);
   list_for_each(cur_node, &mylist) {
     item = list_entry(cur_node, struct list_item, links);
-    int sz = BUFFER_LENGTH - i;
-    int written = snprintf(kbuf + i, sz, "%d\n", item->data);
+    sz = BUFFER_LENGTH - i;
+    written = snprintf(kbuf + i, sz, "%d\n", item->data);
+
     if (written >= sz) {
-      printk(KERN_INFO "Modlist: Buffer size exceeded. Copying to user.\n");
+      truncated = 1;
       break;
     }
     i += written;
   }
   read_unlock(&rwl);
 
-  size_t n = min_t(size_t, (size_t)i, len);
+  if (truncated)
+    pr_info("Modlist: Buffer size exceeded. Copying to user.\n");
+
+  n = min_t(size_t, (size_t)i, len);
   if (copy_to_user(buf, kbuf, n))
     return -EFAULT;
 
-  (*off) += n; /* Update the file pointer */
-
+  (*off) += n;
   return n;
 }
 
 static const struct proc_ops proc_entry_fops = {
+    .proc_open = modlist_open,
     .proc_read = modlist_read,
     .proc_write = modlist_write,
+    .proc_release = modlist_release,
 };
 
-/* Función que se invoca cuando se carga el módulo en el kernel */
-int modulo_lin_init(void) {
-  int ret = 0;
-
+static int __init modulo_lin_init(void)
+{
   INIT_LIST_HEAD(&mylist);
 
   proc_entry = proc_create("modlist", 0666, NULL, &proc_entry_fops);
   if (proc_entry == NULL) {
-    ret = -ENOMEM;
-    printk(KERN_INFO "Modlist: Can't create /proc entry\n");
-  } else {
-    printk(KERN_INFO "Modlist: Module loaded\n");
+    pr_err("Modlist: Can't create /proc entry\n");
+    return -ENOMEM;
   }
 
-  return ret;
+  pr_info("Modlist: Module loaded\n");
+  return 0;
 }
 
-/* Función que se invoca cuando se descarga el módulo del kernel */
-void modulo_lin_clean(void) {
-  cleanup_aux();
+static void __exit modulo_lin_clean(void)
+{
+  /* Remove the entry first; open files pin the module, so no user
+   * can be inside the list code when this runs. */
   remove_proc_entry("modlist", NULL);
-  printk(KERN_INFO "Modlist: Module unloaded.\n");
+  cleanup_aux();
+  pr_info("Modlist: Module unloaded.\n");
 }
 
-/* Declaración de funciones init y exit */
 module_init(modulo_lin_init);
 module_exit(modulo_lin_clean);
