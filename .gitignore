@@ -26,3 +26,7 @@ compile_commands.json
 .idea/
 *.swp
 *~
+
+# Dependency files and compiled test binaries
+*.o.d
+P4/test/*/main
