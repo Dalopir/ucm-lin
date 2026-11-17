@@ -74,7 +74,7 @@ static ssize_t prodcons_read(struct file *filp, char __user *ubuf,
         up(&elementos);
         return -ERESTARTSYS;
     }
-    if (kfifo_out_peek(&cbuf, &val, sizeof(val)) != sizeof(val)) {
+    if (kfifo_out(&cbuf, &val, sizeof(val)) != sizeof(val)) {
         up(&mtx);
         up(&elementos);
         return -EIO;
@@ -84,11 +84,6 @@ static ssize_t prodcons_read(struct file *filp, char __user *ubuf,
         up(&mtx);
         up(&elementos);
         return -EINVAL;
-    }
-    if (kfifo_out(&cbuf, &val, sizeof(val)) != sizeof(val)) {
-        up(&mtx);
-        up(&elementos);
-        return -EIO;
     }
     up(&mtx);
     up(&huecos);
