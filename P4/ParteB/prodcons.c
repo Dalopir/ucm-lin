@@ -79,14 +79,13 @@ static ssize_t prodcons_read(struct file *filp, char __user *ubuf,
         up(&elementos);
         return -EIO;
     }
-    n = scnprintf(kbuf, sizeof(kbuf), "%d\n", val);
-    if ((size_t)n > len) {
-        up(&mtx);
-        up(&elementos);
-        return -EINVAL;
-    }
     up(&mtx);
     up(&huecos);
+
+    n = scnprintf(kbuf, sizeof(kbuf), "%d\n", val);
+    if ((size_t)n > len) {
+        return -EINVAL;
+    }
 
     if (copy_to_user(ubuf, kbuf, n))
         return -EFAULT;
